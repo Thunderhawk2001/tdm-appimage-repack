@@ -1,0 +1,92 @@
+name: Repack AppImage
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */12 * * *"
+
+jobs:
+  repack:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Fetch upstream release metadata
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          UPSTREAM_TAG="$(gh api repos/DevilXD/TwitchDropsMiner/releases --jq '.[0].tag_name')"
+          ASSET_DATE="$(gh api repos/DevilXD/TwitchDropsMiner/releases --jq '.[0].assets[] | select(.name | test("Linux.*AppImage.*\\.zip$")) | .updated_at' | head -n 1)"
+
+          # URLs für beide Architekturen holen
+          ZIP_X86="$(gh api repos/DevilXD/TwitchDropsMiner/releases --jq '.[0].assets[] | select(.name | test("Linux\\.AppImage-x86_64\\.zip$")) | .browser_download_url')"
+          ZIP_ARM="$(gh api repos/DevilXD/TwitchDropsMiner/releases --jq '.[0].assets[] | select(.name | test("Linux\\.AppImage-aarch64\\.zip$")) | .browser_download_url')"
+
+          echo "Upstream Tag: ${UPSTREAM_TAG}"
+          echo "ZIP x86_64: ${ZIP_X86}"
+          echo "ZIP aarch64: ${ZIP_ARM}"
+
+          if [[ -z "${ZIP_X86}" ]]; then
+            echo "Error: Kein x86_64 Archiv gefunden!"
+            exit 1
+          fi
+
+          echo "tag=${UPSTREAM_TAG}" >> "$GITHUB_OUTPUT"
+          echo "zip_x86=${ZIP_X86}" >> "$GITHUB_OUTPUT"
+          echo "zip_arm=${ZIP_ARM}" >> "$GITHUB_OUTPUT"
+          echo "asset_date=${ASSET_DATE}" >> "$GITHUB_OUTPUT"
+
+      - name: Download, unpack and publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="${{ steps.check.outputs.tag }}"
+          ZIP_X86="${{ steps.check.outputs.zip_x86 }}"
+          ZIP_ARM="${{ steps.check.outputs.zip_arm }}"
+          ASSET_DATE="${{ steps.check.outputs.asset_date }}"
+
+          # Arbeitsverzeichnis für fertige AppImages
+          mkdir -p release_assets
+
+          # 1. x86_64 verarbeiten
+          echo "Lade x86_64 herunter..."
+          curl --fail --location --silent --show-error --retry 3 -o upstream_x86.zip "${ZIP_X86}"
+          unzip -o -q upstream_x86.zip -d unpack_x86
+          FILE_X86="$(find unpack_x86 -type f -name "*.AppImage" -print -quit)"
+          if [[ -n "${FILE_X86}" ]]; then
+            mv "${FILE_X86}" release_assets/
+          fi
+
+          # 2. aarch64 verarbeiten (falls vorhanden)
+          if [[ -n "${ZIP_ARM}" ]]; then
+            echo "Lade aarch64 herunter..."
+            curl --fail --location --silent --show-error --retry 3 -o upstream_arm.zip "${ZIP_ARM}"
+            unzip -o -q upstream_arm.zip -d unpack_arm
+            FILE_ARM="$(find unpack_arm -type f -name "*.AppImage" -print -quit)"
+            if [[ -n "${FILE_ARM}" ]]; then
+              mv "${FILE_ARM}" release_assets/
+            fi
+          fi
+
+          chmod +x release_assets/*.AppImage
+
+          # Altes Release im Repo löschen, falls schon vorhanden
+          if gh release view "${TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Deleting existing release ${TAG}"
+            gh release delete "${TAG}" --yes --repo "${{ github.repository }}"
+          fi
+
+          # Release mit beiden AppImages erstellen
+          gh release create "${TAG}" release_assets/*.AppImage \
+            --repo "${{ github.repository }}" \
+            --prerelease \
+            --title "TwitchDropsMiner ${TAG}" \
+            --notes "Automated repack from ${ASSET_DATE}. Raw .AppImage files extracted for x86_64 and aarch64."
