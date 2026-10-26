@@ -32,12 +32,13 @@ jobs:
           SHA="$(grep -oE 'Reference commit:[^0-9a-f]*[0-9a-f]{40}' <<<"${BODY}" | grep -oE '[0-9a-f]{40}$' | head -n 1 || true)"
           BUILD_DATE="$(sed -nE 's/.*Last build date:[^0-9]*([0-9-]+ [0-9:]+\+[0-9:]+).*/\1/p' <<<"${BODY}" | head -n 1 || true)"
 
-          if [[ -z "${SHA}" ]]; then
-            echo "::error::Kein Reference commit im Upstream-Release gefunden"
+          if [[ -z "${SHA}" || -z "${BUILD_DATE}" ]]; then
+            echo "::error::Reference commit oder Build-Datum fehlt"
             exit 1
           fi
 
-          OWN_TAG="dev-${SHA:0:7}"
+          VERSION="$(date -u -d "${BUILD_DATE}" '+%Y.%-m.%-d-%H%M%S')"
+          OWN_TAG="v${VERSION}-${SHA:0:7}"
           echo "Upstream commit: ${SHA} -> eigener Tag: ${OWN_TAG}"
 
           if gh release view "${OWN_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
