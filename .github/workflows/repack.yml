@@ -125,6 +125,5 @@ jobs:
 
           gh release create "${OWN_TAG}" release_assets/*.AppImage release_assets/SHA256SUMS \
             --repo "${GITHUB_REPOSITORY}" \
-            --prerelease \
             --title "TwitchDropsMiner ${OWN_TAG}" \
             --notes-file notes.md
