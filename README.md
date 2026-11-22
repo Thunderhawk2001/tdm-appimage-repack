@@ -29,7 +29,7 @@ The binaries are extracted unmodified from the official upstream release ZIP fil
 
 ## License and attribution
 
-The upstream project, [DevilXD/TwitchDropsMiner](https://github.com/DevilXD/TwitchDropsMiner), is licensed under the MIT License, Copyright (c) 2024 DevilXD. The full license text is included in [`LICENSE`](LICENSE).
+The upstream project, [DevilXD/TwitchDropsMiner](https://github.com/DevilXD/TwitchDropsMiner), is licensed under the MIT License, Copyright (c) 2024 DevilXD. The repackaging workflow in this repository is also licensed under the MIT License; the full license text is included in [`LICENSE`](LICENSE).
 
 This repository is not affiliated with or endorsed by the upstream author.
 
