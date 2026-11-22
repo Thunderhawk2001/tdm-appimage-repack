@@ -7,11 +7,11 @@ Original Repository: https://github.com/DevilXD/TwitchDropsMiner
 
 ## How it works
 
-A GitHub Actions workflow ([`repack.yml`](.github/workflows/repack.yml)) runs every 12 hours and can be started manually.
+A GitHub Actions workflow ([`repack.yml`](.github/workflows/repack.yml)) runs every 12 hours, can be started manually, and runs as a dry-run on pull requests that modify it.
 
 1. It reads the upstream pre-release `dev-build` and extracts the `Reference commit` from its release notes.
 2. If a release named `dev-<first 7 chars of that commit>` already exists in this repository, the run ends without doing anything.
-3. Otherwise it downloads the upstream ZIP files `Twitch.Drops.Miner.Linux.AppImage-x86_64.zip` and `Twitch.Drops.Miner.Linux.AppImage-aarch64.zip`, extracts the `.AppImage` files and publishes them as a pre-release.
+3. Otherwise it downloads the upstream ZIP files `Twitch.Drops.Miner.Linux.AppImage-x86_64.zip` and `Twitch.Drops.Miner.Linux.AppImage-aarch64.zip`, verifies their SHA-256 digests against the upstream release API, extracts the `.AppImage` files and publishes them together with `SHA256SUMS` as a release.
 
 No upstream source code is stored in this repository.
 
@@ -23,6 +23,7 @@ Files per release:
 
 - `Twitch.Drops.Miner-x86_64.AppImage`
 - `Twitch.Drops.Miner-aarch64.AppImage`
+- `SHA256SUMS`
 
 The binaries are extracted unmodified from the official upstream release ZIP files.
 

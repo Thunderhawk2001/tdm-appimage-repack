@@ -4,9 +4,12 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "0 */12 * * *"
+  pull_request:
+    paths:
+      - ".github/workflows/repack.yml"
 
 concurrency:
-  group: repack
+  group: repack-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -22,13 +25,13 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
-      - name: Check upstream commit
-        id: check
+      - name: Check, verify, unpack and publish
         shell: bash
         run: |
           set -euo pipefail
 
-          BODY="$(gh api "repos/${UPSTREAM}/releases/tags/${UPSTREAM_TAG}" --jq '.body')"
+          RELEASE_JSON="$(gh api "repos/${UPSTREAM}/releases/tags/${UPSTREAM_TAG}")"
+          BODY="$(jq -r '.body // ""' <<<"${RELEASE_JSON}")"
           SHA="$(grep -oE 'Reference commit:[^0-9a-f]*[0-9a-f]{40}' <<<"${BODY}" | grep -oE '[0-9a-f]{40}$' | head -n 1 || true)"
           BUILD_DATE="$(sed -nE 's/.*Last build date:[^0-9]*([0-9-]+ [0-9:]+\+[0-9:]+).*/\1/p' <<<"${BODY}" | head -n 1 || true)"
 
@@ -40,55 +43,97 @@ jobs:
           OWN_TAG="dev-${SHA:0:7}"
           echo "Upstream commit: ${SHA} -> eigener Tag: ${OWN_TAG}"
 
-          if gh release view "${OWN_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            echo "Release ${OWN_TAG} existiert bereits, nichts zu tun."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-
-          {
-            echo "own_tag=${OWN_TAG}"
-            echo "sha=${SHA}"
-            echo "build_date=${BUILD_DATE}"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Download, unpack and publish
-        if: steps.check.outputs.skip != 'true'
-        shell: bash
-        env:
-          OWN_TAG: ${{ steps.check.outputs.own_tag }}
-          SHA: ${{ steps.check.outputs.sha }}
-          BUILD_DATE: ${{ steps.check.outputs.build_date }}
-        run: |
-          set -euo pipefail
-
-          mkdir -p dl release_assets
-
-          gh release download "${UPSTREAM_TAG}" --repo "${UPSTREAM}" \
-            --pattern 'Twitch.Drops.Miner.Linux.AppImage-x86_64.zip' \
-            --pattern 'Twitch.Drops.Miner.Linux.AppImage-aarch64.zip' \
-            --dir dl
-
-          if [[ ! -f dl/Twitch.Drops.Miner.Linux.AppImage-x86_64.zip ]]; then
-            echo "::error::x86_64 Archiv fehlt"
+          if err="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${OWN_TAG}" 2>&1 >/dev/null)"; then
+            echo "Release ${OWN_TAG} existiert bereits."
+            if [[ "${GITHUB_EVENT_NAME}" != "pull_request" ]]; then
+              echo "Nichts zu tun."
+              exit 0
+            fi
+            echo "Dry-run (pull_request): fahre trotz bestehendem Release fort."
+          elif [[ "${err}" != *"HTTP 404"* ]]; then
+            echo "::error::GitHub API Fehler beim Pruefen von ${OWN_TAG}: ${err}"
             exit 1
           fi
 
-          for z in dl/*.zip; do
-            d="unpack_$(basename "${z}" .zip)"
-            unzip -o -q "${z}" -d "${d}"
-            f="$(find "${d}" -type f -name '*.AppImage' -print -quit)"
-            if [[ -n "${f}" ]]; then
-              mv "${f}" release_assets/
+          ASSETS=(
+            "Twitch.Drops.Miner.Linux.AppImage-x86_64.zip"
+            "Twitch.Drops.Miner.Linux.AppImage-aarch64.zip"
+          )
+
+          for name in "${ASSETS[@]}"; do
+            if ! jq -e --arg n "${name}" 'any(.assets[]; .name == $n)' <<<"${RELEASE_JSON}" >/dev/null; then
+              echo "::error::Upstream-Asset fehlt: ${name}"
+              exit 1
             fi
           done
 
-          chmod +x release_assets/*.AppImage
-          ls -l release_assets
+          mkdir -p dl release_assets
+          RELEASE_FILES=()
+          : > zip_sums.txt
 
-          gh release create "${OWN_TAG}" release_assets/*.AppImage \
+          for name in "${ASSETS[@]}"; do
+            asset_id="$(jq -r --arg n "${name}" 'first(.assets[] | select(.name == $n) | .id)' <<<"${RELEASE_JSON}")"
+            digest="$(jq -r --arg n "${name}" 'first(.assets[] | select(.name == $n) | .digest // "")' <<<"${RELEASE_JSON}")"
+
+            if [[ "${digest}" != sha256:* ]]; then
+              echo "::error::Fehlender oder ungueltiger SHA-256-Digest fuer ${name}: ${digest}"
+              exit 1
+            fi
+
+            gh api -H "Accept: application/octet-stream" "repos/${UPSTREAM}/releases/assets/${asset_id}" > "dl/${name}"
+
+            expected="${digest#sha256:}"
+            actual="$(sha256sum "dl/${name}" | awk '{print $1}')"
+            if [[ "${actual}" != "${expected}" ]]; then
+              echo "::error::SHA-256-Abweichung fuer ${name}: erwartet ${expected}, erhalten ${actual}"
+              exit 1
+            fi
+            echo "OK ${name} (${actual})"
+            echo "${actual}  ${name}" >> zip_sums.txt
+
+            d="unpack_${name%.zip}"
+            unzip -o -q "dl/${name}" -d "${d}"
+            f="$(find "${d}" -type f -name '*.AppImage' -print -quit)"
+            if [[ -z "${f}" ]]; then
+              echo "::error::Keine .AppImage-Datei in ${name} gefunden"
+              exit 1
+            fi
+
+            target="release_assets/$(basename "${f}")"
+            if [[ -e "${target}" ]]; then
+              echo "::error::Dateinamen-Konflikt in release_assets: ${target}"
+              exit 1
+            fi
+            mv "${f}" "${target}"
+            RELEASE_FILES+=("${target}")
+          done
+
+          (cd release_assets && sha256sum -- *.AppImage > SHA256SUMS)
+          RELEASE_FILES+=("release_assets/SHA256SUMS")
+
+          {
+            echo "Automated repack of upstream ${UPSTREAM_TAG} (commit ${SHA}, build date ${BUILD_DATE}). Raw .AppImage files, unmodified."
+            echo
+            echo "SHA-256 of the published files (also attached as \`SHA256SUMS\`):"
+            echo '```'
+            cat release_assets/SHA256SUMS
+            echo '```'
+            echo
+            echo "SHA-256 of the verified upstream ZIP files:"
+            echo '```'
+            cat zip_sums.txt
+            echo '```'
+          } > notes.md
+
+          ls -l "${RELEASE_FILES[@]}"
+          cat notes.md
+
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            echo "Dry-run (pull_request): ueberspringe gh release create fuer ${OWN_TAG}."
+            exit 0
+          fi
+
+          gh release create "${OWN_TAG}" "${RELEASE_FILES[@]}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --prerelease \
             --title "TwitchDropsMiner ${OWN_TAG}" \
-            --notes "Automated repack of upstream ${UPSTREAM_TAG} (commit ${SHA}, build date ${BUILD_DATE}). Raw .AppImage files, unmodified."
+            --notes-file notes.md
